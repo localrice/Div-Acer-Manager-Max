@@ -96,7 +96,7 @@
                         <TextBlock DockPanel.Dock="Left" Text="Usage:" Opacity="0.7" Width="90"
                                    VerticalAlignment="Center" />
                         <StackPanel DockPanel.Dock="Right">
-                            <TextBlock Text="{Binding GpuUsage, StringFormat='{}{0}%'}" FontWeight="SemiBold"
+                            <TextBlock Text="{Binding GpuUsage, StringFormat='{}{0:F1}%'}" FontWeight="SemiBold"
                                        Width="50" VerticalAlignment="Center" />
                             <ProgressBar Value="{Binding GpuUsage}" Maximum="100" MinWidth="10" MaxWidth="Infinity"
                                          Margin="0" VerticalAlignment="Center" />

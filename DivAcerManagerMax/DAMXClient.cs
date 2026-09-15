@@ -250,6 +250,20 @@ public class DAMXClient : IDisposable
     }
 
     /// <summary>
+    ///     Get Intel iGPU render-engine utilization from the privileged daemon.
+    /// </summary>
+    /// <returns>Render/3D utilization percentage, or zero when unavailable</returns>
+    public async Task<double> GetIntelGpuUsageAsync()
+    {
+        var response = await SendCommandAsync("get_intel_gpu_metrics");
+        if (!response.RootElement.GetProperty("success").GetBoolean())
+            return 0;
+
+        var data = response.RootElement.GetProperty("data");
+        return data.GetProperty("usage").GetDouble();
+    }
+
+    /// <summary>
     ///     Set thermal profile
     /// </summary>
     /// <param name="profile">Profile name</param>

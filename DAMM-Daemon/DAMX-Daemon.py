@@ -21,6 +21,7 @@ import traceback
 from pathlib import Path
 from enum import Enum
 from PowerSourceDetection import PowerSourceDetector 
+from IntelGpuMetrics import IntelGpuMetrics
 from typing import Dict, List, Tuple, Set
 # from KeyboardMonitor import KeyboardMonitor
 
@@ -1018,8 +1019,9 @@ class DAMXManager:
 class DaemonServer:
     """Unix Socket server for IPC with the GUI client"""
 
-    def __init__(self, manager: DAMXManager):
+    def __init__(self, manager: DAMXManager, intel_gpu_metrics: IntelGpuMetrics):
         self.manager = manager
+        self.intel_gpu_metrics = intel_gpu_metrics
         self.socket = None
         self.running = False
         self.clients = []
@@ -1367,6 +1369,18 @@ class DaemonServer:
                     }
                 }
 
+            elif command == "get_intel_gpu_metrics":
+                # rcs0-busy is a cumulative render-engine counter; the monitor
+                # converts successive reads into a percentage for the GUI.
+                return {
+                    "success": True,
+                    "data": {
+                        "usage": self.intel_gpu_metrics.get_usage()
+                        if self.intel_gpu_metrics.available else 0.0,
+                        "available": self.intel_gpu_metrics.available
+                    }
+                }
+
             elif command == "get_version":
                 return {
                     "success": True,
@@ -1529,6 +1543,7 @@ class DAMXDaemon:
     def __init__(self):
         self.running = False
         self.manager = None
+        self.intel_gpu_metrics = None
         self.server = None
         self.config = None
 
@@ -1576,6 +1591,7 @@ class DAMXDaemon:
             # Initialize DAMXManager
             self.manager = DAMXManager()
             log.info(f"Driver Version: {self.manager.get_driver_version()}")
+            self.intel_gpu_metrics = IntelGpuMetrics(log)
 
             # Initialize keyboard monitor early
             # self.keyboard_monitor = KeyboardMonitor(
@@ -1624,7 +1640,7 @@ class DAMXDaemon:
         # Set up and run the server
         try:
             self.running = True
-            self.server = DaemonServer(self.manager)
+            self.server = DaemonServer(self.manager, self.intel_gpu_metrics)
             self.power_monitor.start_monitoring()
             self.server.start()
             # Start keyboard monitoring
@@ -1650,6 +1666,9 @@ class DAMXDaemon:
     
         if self.power_monitor:
             self.power_monitor.stop_monitoring()
+
+        if self.intel_gpu_metrics:
+            self.intel_gpu_metrics.close()
     
         # Remove PID file
         try:

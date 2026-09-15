@@ -70,6 +70,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
     private double _ramUsage;
     private CartesianChart _temperatureChart;
     private ObservableCollection<ISeries> _tempSeries;
+    public DAMXClient? DaemonClient { get; set; }
 
     public Dashboard()
     {
@@ -208,6 +209,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
     {
         try
         {
+            var daemonClient = DaemonClient ?? (VisualRoot as MainWindow)?._client;
             var metricsData = await Task.Run(() =>
             {
                 var data = new MetricsData();
@@ -225,7 +227,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                 data.RamUsage = GetRamUsage();
 
                 // Update GPU metrics
-                var gpuMetrics = GetGpuMetrics();
+                var gpuMetrics = GetGpuMetrics(daemonClient, data.CpuTemp);
                 data.GpuTemp = gpuMetrics.temperature;
                 data.GpuUsage = gpuMetrics.usage;
 
@@ -329,31 +331,50 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
     {
         try
         {
-            // Check for NVIDIA GPU
-            if (Directory.Exists("/sys/class/drm/card0/device/driver/module/nvidia") ||
-                RunCommand("lspci", "").Contains("NVIDIA"))
+            var activeDrivers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var cardPath in Directory.GetDirectories("/sys/class/drm", "card*"))
+            {
+                var driverPath = Path.Combine(cardPath, "device", "driver");
+                if (!Directory.Exists(driverPath))
+                    continue;
+
+                var driverName = new DirectoryInfo(driverPath).ResolveLinkTarget(true)?.Name;
+                if (!string.IsNullOrEmpty(driverName))
+                    activeDrivers.Add(driverName);
+            }
+
+            // Prefer a currently bound driver so a powered-off dGPU listed by
+            // lspci does not hide the active integrated GPU.
+            if (activeDrivers.Contains("nvidia"))
             {
                 _gpuType = GpuType.Nvidia;
                 return;
             }
 
-            // Check for AMD GPU
-            if (Directory.Exists("/sys/class/drm/card0/device/driver/module/amdgpu") ||
-                RunCommand("lspci", "").Contains("AMD") ||
-                RunCommand("lspci", "").Contains("ATI"))
+            if (activeDrivers.Contains("amdgpu"))
             {
                 _gpuType = GpuType.Amd;
                 return;
             }
 
-            // Default to Intel if not NVIDIA or AMD
-            if (RunCommand("lspci", "").Contains("Intel"))
+            if (activeDrivers.Contains("i915"))
             {
                 _gpuType = GpuType.Intel;
                 return;
             }
 
-            _gpuType = GpuType.Unknown;
+            // Fallback for systems whose DRM driver links are unavailable.
+            var lspciOutput = RunCommand("lspci", "");
+            if (lspciOutput.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase))
+                _gpuType = GpuType.Nvidia;
+            else if (lspciOutput.Contains("AMD", StringComparison.OrdinalIgnoreCase) ||
+                     lspciOutput.Contains("ATI", StringComparison.OrdinalIgnoreCase))
+                _gpuType = GpuType.Amd;
+            else if (lspciOutput.Contains("Intel", StringComparison.OrdinalIgnoreCase))
+                _gpuType = GpuType.Intel;
+            else
+                _gpuType = GpuType.Unknown;
+
         }
         catch
         {
@@ -450,7 +471,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
         if (lspciMatch.Success)
         {
             var rawName = lspciMatch.Groups[1].Value.Trim();
-            return Regex.Replace(rawName, @"\b(Alder Lake|Raptor Lake|Xe)\b", "").Trim(); // Remove chipset names
+            return rawName;
         }
 
         return "Intel Graphics (Unknown Model)";
@@ -798,7 +819,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
         }
     }
 
-    private (double temperature, double usage) GetGpuMetrics()
+    private (double temperature, double usage) GetGpuMetrics(DAMXClient? daemonClient, double cpuTemperature)
     {
         try
         {
@@ -809,7 +830,7 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                 case GpuType.Amd:
                     return GetAmdGpuMetrics();
                 case GpuType.Intel:
-                    return GetIntelGpuMetrics();
+                    return GetIntelGpuMetrics(daemonClient, cpuTemperature);
                 default:
                     return (0, 0);
             }
@@ -896,29 +917,17 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
         }
     }
 
-    private (double temperature, double usage) GetIntelGpuMetrics()
+    private (double temperature, double usage) GetIntelGpuMetrics(DAMXClient? daemonClient, double cpuTemperature)
     {
         try
         {
-            double temp = 0;
-            double usage = 0;
+            if (daemonClient == null || !daemonClient.IsConnected)
+                return (cpuTemperature, 0);
 
-            // Use cached GPU temp path if available
-            if (_systemInfoPaths.ContainsKey("gpu_temp") && File.Exists(_systemInfoPaths["gpu_temp"]))
-            {
-                var tempStr = File.ReadAllText(_systemInfoPaths["gpu_temp"]);
-                if (int.TryParse(tempStr.Trim(), out var tempValue))
-                    temp = tempValue / 1000.0; // Convert from milliCelsius to Celsius
-            }
-
-            // For usage, we might be able to use the intel_gpu_top tool
-            var intelOutput = RunCommand("intel_gpu_top", "-o -");
-            var match = Regex.Match(intelOutput, @"Render/3D.*?(\d+)%");
-            if (match.Success)
-                if (double.TryParse(match.Groups[1].Value, out var usageValue))
-                    usage = usageValue;
-
-            return (temp, usage);
+            // i915 does not universally expose a GPU temperature sensor. Keep the
+            // existing GPU temperature display useful with the package temperature.
+            var usage = daemonClient.GetIntelGpuUsageAsync().GetAwaiter().GetResult();
+            return (cpuTemperature, usage);
         }
         catch
         {
@@ -1000,32 +1009,6 @@ public partial class Dashboard : UserControl, INotifyPropertyChanged
                             {
                                 _systemInfoPaths["gpu_temp"] = files[0];
                                 break;
-                            }
-                        }
-
-                    break;
-                case GpuType.Intel:
-                    string[] possibleIntelGpuTempPaths =
-                    {
-                        "/sys/class/thermal/thermal_zone*/temp",
-                        "/sys/class/hwmon/hwmon*/temp1_input"
-                    };
-                    foreach (var pathPattern in possibleIntelGpuTempPaths)
-                        if (Directory.Exists(Path.GetDirectoryName(pathPattern) ?? string.Empty))
-                        {
-                            var dirs = Directory.GetDirectories(Path.GetDirectoryName(pathPattern) ?? string.Empty);
-                            foreach (var dir in dirs)
-                            {
-                                var typeFile = Path.Combine(dir, "type");
-                                if (File.Exists(typeFile) && File.ReadAllText(typeFile).Contains("gpu"))
-                                {
-                                    var tempFile = Path.Combine(dir, "temp");
-                                    if (File.Exists(tempFile))
-                                    {
-                                        _systemInfoPaths["gpu_temp"] = tempFile;
-                                        break;
-                                    }
-                                }
                             }
                         }
 

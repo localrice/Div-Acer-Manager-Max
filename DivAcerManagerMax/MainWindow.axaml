@@ -52,7 +52,7 @@
 
                 <TabItem Header="Dashboard">
 
-                    <views:Dashboard />
+                    <views:Dashboard x:Name="DashboardView" />
 
                 </TabItem>
 

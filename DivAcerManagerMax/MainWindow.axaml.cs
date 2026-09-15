@@ -55,6 +55,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private Grid _daemonErrorGrid;
     private TextBlock _daemonVersionText;
     private TextBlock _driverVersionText;
+    private Dashboard? _dashboard;
     private Slider _gpuFanSlider;
     private int _gpuFanSpeed = 70;
     private TextBlock _gpuFanTextBlock;
@@ -119,6 +120,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         BindControls();
+        _dashboard = this.FindNameScope().Find<Dashboard>("DashboardView");
+        if (_dashboard != null)
+            _dashboard.DaemonClient = _client;
         AttachEventHandlers();
         InitializeAsync();
     }
